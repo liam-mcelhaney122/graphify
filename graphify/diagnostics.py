@@ -68,6 +68,32 @@ def _canonical_edge(edge: Any) -> dict[str, str]:
     }
 
 
+# The relations build mints an `external=True` stub for when the target is not a
+# node (build._EXTERNAL_STUB_RELATIONS): a missing target on one of these is a
+# module outside the corpus, not a broken internal edge.
+_IMPORT_FAMILY_RELATIONS = frozenset({"imports", "imports_from", "re_exports"})
+
+# A Rust `use` path rooted here can only name the scanned crate itself.
+_RUST_LOCAL_PATH_PREFIXES = ("crate::", "self::", "super::")
+
+
+def _names_the_scanned_corpus(edge: Any) -> bool:
+    """True when an import edge's written path cannot be an external dependency.
+
+    A Rust `use` edge keeps its path in ``metadata.use_path``; one rooted at
+    `crate`, `self` or `super` refers to the importing crate, so a missing
+    target is an unresolved internal import (an inline module, a type alias,
+    a macro-generated item), not a dependency. A workspace crate named by its
+    own name is indistinguishable from a dependency here (no manifest is read),
+    so it counts as external.
+    """
+    if not isinstance(edge, dict):
+        return False
+    metadata = edge.get("metadata")
+    use_path = metadata.get("use_path") if isinstance(metadata, dict) else None
+    return isinstance(use_path, str) and use_path.startswith(_RUST_LOCAL_PATH_PREFIXES)
+
+
 def _exact_signature(edge: Any) -> str:
     if not isinstance(edge, dict):
         return "<non-object>"
@@ -165,7 +191,11 @@ def diagnose_extraction(
 
     Missing ``ref_*`` targets are expected external references produced for
     dependencies outside the scanned corpus. They are counted separately from
-    actionable internal dangling endpoints.
+    actionable internal dangling endpoints, as is an import-family edge whose
+    target is not a node (``external_import_edges``): build mints an external
+    stub for it. A Rust ``use`` rooted at ``crate``/``self``/``super`` that is
+    still unresolved stays a dangling endpoint, since it can only name the
+    scanned crate.
     """
     from graphify.build import build_from_json
 
@@ -190,10 +220,11 @@ def diagnose_extraction(
     missing_endpoint_edges = 0
     dangling_endpoint_edges = 0
     external_reference_edges = 0
+    external_import_edges = 0
     self_loop_edges = 0
     valid_candidate_edges = 0
 
-    for edge in canonical_edges:
+    for raw_edge, edge in zip(raw_edges, canonical_edges):
         if edge["_invalid"]:
             non_object_edges += 1
             continue
@@ -206,10 +237,19 @@ def diagnose_extraction(
             # Two intentionally-distinct populations of "external": a `ref_`
             # target here is a JSON/config out-of-corpus reference ($ref /
             # extends / references), whereas import-family externals are minted
-            # as declared `external=True` stub nodes at build time (#2873) and
-            # therefore never reach this branch. Don't try to unify them.
+            # as declared `external=True` stub nodes at build time (#2873), so
+            # on a post-build graph they never reach this branch. On a raw
+            # extraction they do (`use std::fmt;`, `import os`), and are not
+            # dangling internal edges: count them apart, except a Rust `use`
+            # whose written path can only name the scanned crate.
             if source in node_ids and target.startswith("ref_"):
                 external_reference_edges += 1
+            elif (
+                source in node_ids
+                and edge["relation"] in _IMPORT_FAMILY_RELATIONS
+                and not _names_the_scanned_corpus(raw_edge)
+            ):
+                external_import_edges += 1
             else:
                 dangling_endpoint_edges += 1
             continue
@@ -267,6 +307,7 @@ def diagnose_extraction(
         "missing_endpoint_edges": missing_endpoint_edges,
         "dangling_endpoint_edges": dangling_endpoint_edges,
         "external_reference_edges": external_reference_edges,
+        "external_import_edges": external_import_edges,
         "self_loop_edges": self_loop_edges,
         "valid_candidate_edges": valid_candidate_edges,
         "exact_duplicate_edges": _count_extra(exact_counts),
@@ -374,6 +415,7 @@ def format_diagnostic_report(summary: dict[str, Any]) -> str:
         f"missing_endpoint_edges: {summary['missing_endpoint_edges']}",
         f"dangling_endpoint_edges: {summary['dangling_endpoint_edges']}",
         f"external_reference_edges: {summary.get('external_reference_edges', 0)}",
+        f"external_import_edges: {summary.get('external_import_edges', 0)}",
         f"self_loop_edges: {summary['self_loop_edges']}",
         f"exact_duplicate_edges: {summary['exact_duplicate_edges']}",
         f"directed_unique_endpoint_pairs: {summary['directed_unique_endpoint_pairs']}",

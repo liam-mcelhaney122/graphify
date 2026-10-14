@@ -134,6 +134,37 @@ def test_diagnose_extraction_separates_external_reference_edges() -> None:
     assert "external_reference_edges: 1" in report
 
 
+def test_diagnose_extraction_separates_external_imports_from_unresolved_internal_ones() -> None:
+    # On a raw extraction an import of a module outside the corpus has no node
+    # yet (build mints its external stub later); it is not a dangling internal
+    # edge. A Rust `use` rooted at crate/self/super that is still unresolved is.
+    extraction = {
+        "nodes": [
+            {"id": "lib", "label": "lib.rs", "file_type": "code", "source_file": "src/lib.rs"},
+        ],
+        "edges": [
+            {"source": "lib", "target": "hashmap", "relation": "imports_from", "confidence": "EXTRACTED",
+             "source_file": "src/lib.rs", "metadata": {"use_path": "std::collections::HashMap"}},
+            {"source": "lib", "target": "os", "relation": "imports_from", "confidence": "EXTRACTED",
+             "source_file": "app.py"},
+            {"source": "lib", "target": "thing", "relation": "imports_from", "confidence": "EXTRACTED",
+             "source_file": "src/lib.rs", "metadata": {"use_path": "crate::missing::Thing"}},
+            {"source": "lib", "target": "thing", "relation": "imports", "confidence": "EXTRACTED",
+             "source_file": "src/lib.rs", "metadata": {"use_path": "super::Thing as T"}},
+            {"source": "lib", "target": "missing", "relation": "calls", "confidence": "EXTRACTED",
+             "source_file": "src/lib.rs"},
+        ],
+    }
+
+    summary = diagnose_extraction(extraction, directed=True)
+    report = format_diagnostic_report(summary)
+
+    assert summary["external_import_edges"] == 2
+    assert summary["dangling_endpoint_edges"] == 3
+    assert summary["external_reference_edges"] == 0
+    assert "external_import_edges: 2" in report
+
+
 def test_diagnose_extraction_accepts_node_link_links_key() -> None:
     extraction = _diagnostic_fixture()
     extraction["links"] = extraction.pop("edges")

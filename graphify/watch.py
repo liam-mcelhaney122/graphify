@@ -2069,9 +2069,21 @@ def _rebuild_code(
                 # unchanged corpus's, scoped exactly like the nodes above so a
                 # deleted/re-extracted file's edges can never resurrect.
                 for edge in ctx_graph.get("links", ctx_graph.get("edges", [])):
-                    if edge.get("relation") not in (
-                        "contains", "method", "inherits"
-                    ):
+                    relation = edge.get("relation")
+                    edge_metadata = edge.get("metadata")
+                    # A Rust `use` edge keeps its written path (`metadata.use_path`);
+                    # the Rust resolver follows an unchanged module's re-exports
+                    # and globs through it, so a changed file's `use lib::Thing`
+                    # resolves on an incremental build as it does on a full one.
+                    # `case_of` lets `use crate::e::Color::Red` reach the variant.
+                    rust_use = (
+                        relation in ("imports", "imports_from")
+                        and isinstance(edge_metadata, dict)
+                        and isinstance(edge_metadata.get("use_path"), str)
+                    )
+                    if relation not in (
+                        "contains", "method", "inherits", "case_of"
+                    ) and not rust_use:
                         continue
                     if not _is_ast_tier(edge):
                         continue
@@ -2081,10 +2093,11 @@ def _rebuild_code(
                     context_edge = {
                         "source": edge.get("source"),
                         "target": edge.get("target"),
-                        "relation": edge.get("relation"),
+                        "relation": relation,
                         "source_file": source_file,
                     }
-                    edge_metadata = edge.get("metadata")
+                    if rust_use:
+                        context_edge["metadata"] = {"use_path": edge_metadata["use_path"]}
                     if (
                         isinstance(edge_metadata, dict)
                         and isinstance(

@@ -26,6 +26,7 @@ from .ruby_resolution import resolve_ruby_member_calls
 from .csharp_dispatch import resolve_csharp_interface_dispatch
 from .swift_dispatch import resolve_swift_protocol_dispatch
 from .pascal_resolution import resolve_pascal_inherited_calls
+from .rust_resolution import resolve_rust_use_paths
 from .markdown_resolution import MARKDOWN_MENTION_SUFFIXES, resolve_markdown_mentions
 
 # --- migrated to graphify/extractors/ (see graphify/extractors/MIGRATION.md) ---
@@ -9920,6 +9921,22 @@ def extract(
             logging.getLogger(__name__).warning(
                 "Go type-reference resolution failed, skipping: %s", exc
             )
+    # Rust `use` paths: land `use gt_core::ItemStack;` and the stub a file mints
+    # for an imported type on the node the written path names, through the
+    # module tree and the modules' own re-exports. Before the rewire so an exact
+    # path beats the unique-label heuristic, and before the import-evidence
+    # index so a resolved `use` counts as evidence (graphify/rust_resolution.py).
+    if any(effective_suffix(p) == ".rs" for p in paths):
+        try:
+            resolve_rust_use_paths(
+                paths, all_nodes, all_edges, root,
+                resolution_context_nodes, resolution_context_edges,
+            )
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Rust use-path resolution failed, skipping: %s", exc
+            )
     # Cross-file Python import resolution and type-reference repointing (#3252)
     py_paths = [p for p in paths if effective_suffix(p) == ".py"]
     if py_paths:
@@ -10096,9 +10113,11 @@ def extract(
     file_to_symbol_imports: dict[str, set[str]] = {}
     file_to_module_imports: dict[str, set[str]] = {}
     for e in all_edges:
+        if e.get("_rust_use_binding"):
+            continue  # a Rust `use` group's per-binding edge is not call evidence
         if e.get("relation") == "imports":
             file_to_symbol_imports.setdefault(e["source"], set()).add(e["target"])
-        elif e.get("relation") == "imports_from" and not e.get("_rust_use_binding"):
+        elif e.get("relation") == "imports_from":
             file_to_module_imports.setdefault(e["source"], set()).add(e["target"])
 
     # Map each node back to its containing file node id so we can ask

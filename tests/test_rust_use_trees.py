@@ -101,13 +101,25 @@ def test_each_binding_gets_the_plain_use_target(tmp_path: Path):
         "use crate::util::parse;\nuse std::io::Read;\nuse foo::bar as baz;\nuse crate::util::*;\npub use\n    std::fmt;\n")})
     edges = sorted((e["relation"], e["target"], e["source_location"]) for e in result["edges"]
                    if e.get("context") == "import")
+    by_label = {n["label"]: n["id"] for n in result["nodes"] if n.get("source_file", "").endswith("util.rs")}
+    util, parse, render = by_label["util.rs"], by_label["parse()"], by_label["render()"]
+    # A binding that names a node in the corpus lands on it (graphify/rust_resolution.py):
+    # a module on its file node as `imports_from`, an item on its node as `imports`.
+    # One naming nothing the corpus holds (`std::io::Read`, `foo::bar`, a module
+    # with no file) keeps the bare last segment v8 emits.
     assert edges == sorted([
-        ("imports_from", "util", "L1"), ("imports_from", "parse", "L1"), ("imports_from", "render_as_draw", "L1"),
+        ("imports_from", util, "L1"), ("imports", parse, "L1"), ("imports", render, "L1"),
         ("imports_from", "deep", "L1"), ("imports_from", "nested", "L1"), ("imports_from", "b", "L2"),
         ("imports_from", "c", "L2"),
-        # plain declarations, exactly as v8 emits them
-        ("imports_from", "parse", "L3"), ("imports_from", "read", "L4"), ("imports_from", "bar_as_baz", "L5"),
-        ("imports_from", "util", "L6"), ("imports_from", "fmt", "L7")])
+        ("imports", parse, "L3"), ("imports_from", "read", "L4"), ("imports_from", "bar_as_baz", "L5"),
+        ("imports_from", util, "L6"), ("imports_from", "fmt", "L7")])
+    paths = sorted((e["source_location"], e["metadata"]["use_path"]) for e in result["edges"]
+                   if e.get("context") == "import")
+    assert paths == sorted([
+        ("L1", "crate::util"), ("L1", "crate::util::parse"), ("L1", "crate::util::render as draw"),
+        ("L1", "crate::util::nested::deep"), ("L1", "crate::util::nested::*"), ("L2", "a::b"), ("L2", "c"),
+        ("L3", "crate::util::parse"), ("L4", "std::io::Read"), ("L5", "foo::bar as baz"),
+        ("L6", "crate::util::*"), ("L7", "std::fmt")])
     sources = {e["source"] for e in result["edges"] if e.get("context") == "import"}
     file_node = next(n["id"] for n in result["nodes"] if n.get("label") == "user.rs")
     assert sources == {file_node}
@@ -119,8 +131,9 @@ def test_a_file_whose_only_use_is_a_root_group_gets_edges_from_its_file_node(tmp
     # v8 emitted nothing for `use {..};`.
     result = _extract(tmp_path, {**_FILES, "src/user.rs": "use {crate::util::parse, std::io};\n"})
     file_node = next(n["id"] for n in result["nodes"] if n.get("label") == "user.rs")
-    assert sorted((e["source"], e["target"]) for e in result["edges"] if e.get("context") == "import") == [
-        (file_node, "io"), (file_node, "parse")]
+    parse = next(n["id"] for n in result["nodes"] if n.get("label") == "parse()")
+    assert sorted((e["source"], e["target"]) for e in result["edges"] if e.get("context") == "import") == sorted([
+        (file_node, "io"), (file_node, parse)])
 
 
 # Files at the scan root, so file node ids are bare stems: the binding `util`
@@ -205,5 +218,7 @@ def test_a_cache_entry_from_before_the_bindings_is_not_served(tmp_path: Path, mo
     monkeypatch.setattr(cache_mod, "_AST_CACHE_SCHEMA", current)
     result = extract(sorted(tmp_path / name for name in files), root=tmp_path, cache_root=tmp_path / "graphify-out",
                      parallel=False)
+    by_label = {n["label"]: n["id"] for n in result["nodes"] if n.get("source_file", "").endswith("util.rs")}
     assert sorted(e["target"] for e in result["edges"]
-                  if e.get("context") == "import" and e["source_file"].endswith("user.rs")) == ["parse", "render"]
+                  if e.get("context") == "import" and e["source_file"].endswith("user.rs")) == sorted([
+                      by_label["parse()"], by_label["render()"]])

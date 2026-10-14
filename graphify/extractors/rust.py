@@ -160,6 +160,53 @@ def _rust_use_module(argument: str) -> str:
     return clean.split("::")[-1].strip()
 
 
+_RUST_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+_RUST_USE_ALIAS_RE = re.compile(r"\bas\s+(?:r#)?([A-Za-z_][A-Za-z0-9_]*)\s*$")
+
+
+def _rust_use_path(binding: str, inline_mods: tuple[str, ...] = ()) -> str:
+    """The path a `use` binding names, normalised for the cross-file resolver.
+
+    `crate::util :: {parse /* note */ as p}` gives `crate::util::parse as p`;
+    a glob keeps its `*` (`super::*`); a leading `::` is dropped (it only says
+    the first segment is an extern crate); raw identifiers lose their `r#`.
+
+    ``inline_mods`` is the chain of inline `mod name { .. }` items enclosing the
+    declaration. The graph attributes everything in a file to the file's module,
+    so a path is rewritten relative to it: inside `mod tests { use super::*; }`
+    the `super` is the file itself (`self::*`), and `self::x` there becomes
+    `self::tests::x`. A `super` that climbs past the inline chain keeps climbing
+    from the file's module.
+    """
+    text = _RUST_COMMENT_RE.sub(" ", binding)
+    alias = ""
+    match = _RUST_USE_ALIAS_RE.search(text)
+    if match:
+        alias = match.group(1)
+        text = text[:match.start()]
+    segments = [s.strip() for s in text.split("::")]
+    segments = [s[2:] if s.startswith("r#") else s for s in segments]
+    if segments and segments[0] == "":
+        segments = segments[1:]
+    segments = [s for s in segments if s]
+    if not segments:
+        return ""
+    if inline_mods:
+        if segments[0] == "self":
+            segments = ["self", *inline_mods, *segments[1:]]
+        elif segments[0] == "super":
+            climbed = 0
+            while segments and segments[0] == "super":
+                climbed += 1
+                segments = segments[1:]
+            if climbed <= len(inline_mods):
+                segments = ["self", *inline_mods[:len(inline_mods) - climbed], *segments]
+            else:
+                segments = ["super"] * (climbed - len(inline_mods)) + segments
+    path = "::".join(segments)
+    return f"{path} as {alias}" if alias else path
+
+
 def _rust_use_bindings(node, source: bytes, prefix: str = "", self_path: str = "") -> list[tuple[str, int]]:
     """Each binding of a `use` tree, as the argument of a plain `use` that binds the same
     name, with its line: `a::{b, c as d, e::{self}, f::*}` gives `b`, `c as d`, `a::e`
@@ -283,6 +330,10 @@ def extract_rust(path: Path) -> dict:
     # (bare impl type, method name) -> the method nodes this file's `impl` blocks
     # define, so an in-file `Type::f()` / `self.f()` binds to a method of that type.
     impl_methods: dict[tuple[str, str], set[str]] = {}
+
+    # Chain of inline `mod name { .. }` items enclosing the node being walked:
+    # see the mod_item branch of walk() and _rust_use_path.
+    inline_mods: list[str] = []
 
     def add_node(nid: str, label: str, line: int) -> None:
         if nid not in seen_ids:
@@ -723,16 +774,43 @@ def extract_rust(path: Path) -> dict:
             if arg:
                 module_name = _rust_use_module(_read_text(arg, source))
                 grouped = arg.type in ("use_list", "scoped_use_list")
+                scope = tuple(inline_mods)
                 if module_name:
                     tgt_nid = _make_id(module_name)
                     add_edge(file_nid, tgt_nid, "imports_from", node.start_point[0] + 1, context="import")
                     if grouped:  # call evidence as in v8, then dropped (extract.py)
                         edges[-1]["_rust_use_group"] = True
+                    else:
+                        # The written path, for the cross-file resolver in
+                        # graphify/rust_resolution.py: the bare last segment above
+                        # names no node (`use gt_core::ItemStack` -> `itemstack`).
+                        for binding, _line in _rust_use_bindings(arg, source)[:1]:
+                            if use_path := _rust_use_path(binding, scope):
+                                edges[-1]["metadata"] = {"use_path": use_path}
                 # A group imports what the plain `use` of each of its bindings would.
                 for binding, line in _rust_use_bindings(arg, source) if grouped else []:
                     if binding_name := _rust_use_module(binding):
                         add_edge(file_nid, _make_id(binding_name), "imports_from", line, context="import")
                         edges[-1]["_rust_use_binding"] = True  # not call evidence: v8 had no such edge
+                        if use_path := _rust_use_path(binding, scope):
+                            edges[-1]["metadata"] = {"use_path": use_path}
+            return
+
+        if t == "mod_item":
+            # An inline `mod name { .. }` is walked like the file around it (its
+            # items stay attributed to the file), but a `use` inside it reads
+            # `self`/`super` relative to the inline module: track the chain so
+            # `mod tests { use super::*; }` is recorded as the file's own module.
+            name_node = node.child_by_field_name("name")
+            body = node.child_by_field_name("body")
+            if body is None or name_node is None:
+                return  # `mod foo;` declares a file module: nothing to walk
+            inline_mods.append(_read_text(name_node, source))
+            try:
+                for child in body.children:
+                    walk(child, parent_impl_nid=None)
+            finally:
+                inline_mods.pop()
             return
 
         for child in node.children:

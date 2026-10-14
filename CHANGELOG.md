@@ -2,6 +2,13 @@
 
 Full release notes with details on each version: [GitHub Releases](https://github.com/Graphify-Labs/graphify/releases)
 
+## Unreleased
+
+The AST cache schema is bumped (now 16), so the first build after upgrading re-extracts.
+
+- Fix: **Rust** a `use` now lands on the node its written path names instead of a bare last-segment id: the extractor keeps the path on the edge (`metadata.use_path`, with `mod tests { use super::*; }` read relative to the file), and a cross-file pass walks it through the workspace's module tree (`Cargo.toml` package names, `src/`, `bin/`, `tests/`, `examples/`, `benches/` layouts), the modules' re-exports (`pub use item::ItemStack;`, `pub use a::B as C;`, `pub use gt_core;`) and their glob imports. An item import becomes `imports` to the item, a module or glob import `imports_from` to the module's file, and the per-file placeholder a type annotation minted for an imported name is retargeted and dropped. A name reachable only by being defined once in the target crate (an inline `mod`, `#[path]`) is INFERRED at 0.85; an ambiguous name or an external crate (`std`, `serde`, `bevy`) is left exactly as before. On a 519-file, 11-crate workspace this took dangling import edges from 4,591 to 1,131 (all external crates, type aliases and macro-generated items), placeholder nodes from 1,619 to 1,102 and build-minted external stubs from 1,524 to 214, and let 139 cross-file calls promote from INFERRED to EXTRACTED through import evidence. Incremental builds forward an unchanged file's `use` edges to the resolver so a changed file resolves through unchanged re-exports as a full build does.
+- Fix: **diagnostics** `diagnose_extraction` no longer counts an import of a module outside the corpus (`use std::fmt;`, `import os`), for which build mints an external stub, as a dangling endpoint: they are reported as `external_import_edges`. A Rust `use` rooted at `crate`/`self`/`super` that is still unresolved stays dangling, since it can only name the scanned crate.
+
 ## 0.9.90 (2026-10-13)
 
 Fourteen community pull requests: C# call-resolution and id-collision fixes, Python/Go/dedup correctness, a hub-label sidecar, a post-merge heal hook, and query/build fixes. The AST cache schema is bumped, so the first build after upgrading re-extracts.
